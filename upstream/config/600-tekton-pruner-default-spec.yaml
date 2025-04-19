@@ -1,0 +1,15 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tekton-pruner-default-spec
+  namespace: tekton-pipelines
+data:
+  periodicCleanupEnabled: "true"
+  periodicCleanupIntervalSeconds: "300" #5 minutes
+  global-config: |
+    enforcedConfigLevel: global
+    ttlSecondsAfterFinished: 300
+    successfulHistoryLimit: 3
+    failedHistoryLimit: 3
+    historyLimit: 2

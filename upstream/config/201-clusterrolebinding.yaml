@@ -1,0 +1,18 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tekton-pruner-controller-cluster-access
+  labels:
+    pruner.tekton.dev/release: "devel"
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: default
+    app.kubernetes.io/part-of: tekton-pruner
+subjects:
+  - kind: ServiceAccount
+    name: tekton-pruner-controller
+    namespace: tekton-pipelines
+roleRef:
+  kind: ClusterRole
+  name: tekton-pruner-controller-cluster-access
+  apiGroup: rbac.authorization.k8s.io

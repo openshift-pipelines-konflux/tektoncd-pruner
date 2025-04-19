@@ -1,0 +1,20 @@
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: tekton-pruner-controller
+  namespace: tekton-pipelines
+  labels:
+    pruner.tekton.dev/release: "devel"
+rules:
+  # Needed to watch and load configuration and secret data.
+  - apiGroups: [""]
+    resources:
+      - "configmaps"
+      - "secrets"
+    verbs: ["get", "list", "update", "watch"]
+
+  # This is needed by leader election to run the controller in HA.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "create", "update", "delete", "patch", "watch"]

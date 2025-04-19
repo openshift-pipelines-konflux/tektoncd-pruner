@@ -1,0 +1,2 @@
+# keep the next release version
+tektoncd-pruner=0.1.0
