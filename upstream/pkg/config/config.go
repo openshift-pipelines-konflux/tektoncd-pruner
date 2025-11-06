@@ -18,6 +18,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -100,13 +101,17 @@ type PrunerConfig struct {
 
 // prunerConfigStore defines the store structure to hold config from ConfigMap
 type prunerConfigStore struct {
-	mutex        sync.RWMutex
-	globalConfig GlobalConfig
+	mutex           sync.RWMutex
+	globalConfig    GlobalConfig
+	namespaceConfig map[string]NamespaceSpec // namespace -> NamespaceSpec
 }
 
 var (
 	// PrunerConfigStore is the singleton instance to store pruner config
-	PrunerConfigStore = prunerConfigStore{mutex: sync.RWMutex{}}
+	PrunerConfigStore = prunerConfigStore{
+		mutex:           sync.RWMutex{},
+		namespaceConfig: make(map[string]NamespaceSpec),
+	}
 )
 
 // loads config from configMap (global-config) should be called on startup and if there is a change detected on the ConfigMap
@@ -136,6 +141,41 @@ func (ps *prunerConfigStore) LoadGlobalConfig(ctx context.Context, configMap *co
 	logger.Debugw("Updated global config", "newGlobalConfig", ps.globalConfig)
 
 	return nil
+}
+
+// LoadNamespaceConfig loads config from namespace-level ConfigMap
+func (ps *prunerConfigStore) LoadNamespaceConfig(ctx context.Context, namespace string, configMap *corev1.ConfigMap) error {
+	logger := logging.FromContext(ctx)
+	ps.mutex.Lock()
+	defer ps.mutex.Unlock()
+
+	// Log the current state before updating
+	logger.Debugw("Loading namespace config", "namespace", namespace, "oldConfig", ps.namespaceConfig[namespace])
+
+	namespaceSpec := NamespaceSpec{}
+	if configMap.Data != nil && configMap.Data[PrunerNamespaceConfigKey] != "" {
+		err := yaml.Unmarshal([]byte(configMap.Data[PrunerNamespaceConfigKey]), &namespaceSpec)
+		if err != nil {
+			return err
+		}
+	}
+
+	ps.namespaceConfig[namespace] = namespaceSpec
+
+	// Log the updated state after the update
+	logger.Debugw("Updated namespace config", "namespace", namespace, "newConfig", ps.namespaceConfig[namespace])
+
+	return nil
+}
+
+// DeleteNamespaceConfig removes namespace-level config from the store
+func (ps *prunerConfigStore) DeleteNamespaceConfig(ctx context.Context, namespace string) {
+	logger := logging.FromContext(ctx)
+	ps.mutex.Lock()
+	defer ps.mutex.Unlock()
+
+	logger.Debugw("Deleting namespace config", "namespace", namespace)
+	delete(ps.namespaceConfig, namespace)
 }
 
 // loads config from configMap (global-config) should be called on startup and if there is a change detected on the ConfigMap
@@ -260,7 +300,7 @@ func getFromPrunerConfigResourceLevelwithSelector(namespacesSpec map[string]Name
 	return nil, ""
 }
 
-func getResourceFieldData(globalSpec GlobalConfig, namespace, name string, selector SelectorSpec, resourceType PrunerResourceType, fieldType PrunerFieldType, enforcedConfigLevel EnforcedConfigLevel) (*int32, string) {
+func getResourceFieldData(globalSpec GlobalConfig, namespaceConfigMap map[string]NamespaceSpec, namespace, name string, selector SelectorSpec, resourceType PrunerResourceType, fieldType PrunerFieldType, enforcedConfigLevel EnforcedConfigLevel) (*int32, string) {
 	var fieldData *int32
 	var identified_by string
 
@@ -317,7 +357,34 @@ func getResourceFieldData(globalSpec GlobalConfig, namespace, name string, selec
 		}
 		return fieldData, identified_by
 	case EnforcedConfigLevelNamespace:
-		// get it from global spec, namespace root level
+		// First check namespace-level ConfigMap (tekton-pruner-namespace-spec)
+		nsSpec, found := namespaceConfigMap[namespace]
+		if found {
+			switch fieldType {
+			case PrunerFieldTypeTTLSecondsAfterFinished:
+				fieldData = nsSpec.TTLSecondsAfterFinished
+
+			case PrunerFieldTypeSuccessfulHistoryLimit:
+				if nsSpec.SuccessfulHistoryLimit != nil {
+					fieldData = nsSpec.SuccessfulHistoryLimit
+				} else {
+					fieldData = nsSpec.HistoryLimit
+				}
+
+			case PrunerFieldTypeFailedHistoryLimit:
+				if nsSpec.FailedHistoryLimit != nil {
+					fieldData = nsSpec.FailedHistoryLimit
+				} else {
+					fieldData = nsSpec.HistoryLimit
+				}
+			}
+			if fieldData != nil {
+				identified_by = "identified_by_ns_configmap"
+				return fieldData, identified_by
+			}
+		}
+
+		// Fall back to global spec, namespace root level
 		spec, found := globalSpec.Namespaces[namespace]
 		if found {
 			switch fieldType {
@@ -496,40 +563,198 @@ func (ps *prunerConfigStore) GetPipelineTTLSecondsAfterFinished(namespace, name 
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 	enforcedConfigLevel := ps.GetPipelineEnforcedConfigLevel(namespace, name, selector)
-	return getResourceFieldData(ps.globalConfig, namespace, name, selector, PrunerResourceTypePipelineRun, PrunerFieldTypeTTLSecondsAfterFinished, enforcedConfigLevel)
+	return getResourceFieldData(ps.globalConfig, ps.namespaceConfig, namespace, name, selector, PrunerResourceTypePipelineRun, PrunerFieldTypeTTLSecondsAfterFinished, enforcedConfigLevel)
 }
 
 func (ps *prunerConfigStore) GetPipelineSuccessHistoryLimitCount(namespace, name string, selector SelectorSpec) (*int32, string) {
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 	enforcedConfigLevel := ps.GetPipelineEnforcedConfigLevel(namespace, name, selector)
-	return getResourceFieldData(ps.globalConfig, namespace, name, selector, PrunerResourceTypePipelineRun, PrunerFieldTypeSuccessfulHistoryLimit, enforcedConfigLevel)
+	return getResourceFieldData(ps.globalConfig, ps.namespaceConfig, namespace, name, selector, PrunerResourceTypePipelineRun, PrunerFieldTypeSuccessfulHistoryLimit, enforcedConfigLevel)
 }
 
 func (ps *prunerConfigStore) GetPipelineFailedHistoryLimitCount(namespace, name string, selector SelectorSpec) (*int32, string) {
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 	enforcedConfigLevel := ps.GetPipelineEnforcedConfigLevel(namespace, name, selector)
-	return getResourceFieldData(ps.globalConfig, namespace, name, selector, PrunerResourceTypePipelineRun, PrunerFieldTypeFailedHistoryLimit, enforcedConfigLevel)
+	return getResourceFieldData(ps.globalConfig, ps.namespaceConfig, namespace, name, selector, PrunerResourceTypePipelineRun, PrunerFieldTypeFailedHistoryLimit, enforcedConfigLevel)
 }
 
 func (ps *prunerConfigStore) GetTaskTTLSecondsAfterFinished(namespace, name string, selector SelectorSpec) (*int32, string) {
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 	enforcedConfigLevel := ps.GetTaskEnforcedConfigLevel(namespace, name, selector)
-	return getResourceFieldData(ps.globalConfig, namespace, name, selector, PrunerResourceTypeTaskRun, PrunerFieldTypeTTLSecondsAfterFinished, enforcedConfigLevel)
+	return getResourceFieldData(ps.globalConfig, ps.namespaceConfig, namespace, name, selector, PrunerResourceTypeTaskRun, PrunerFieldTypeTTLSecondsAfterFinished, enforcedConfigLevel)
 }
 
 func (ps *prunerConfigStore) GetTaskSuccessHistoryLimitCount(namespace, name string, selector SelectorSpec) (*int32, string) {
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 	enforcedConfigLevel := ps.GetTaskEnforcedConfigLevel(namespace, name, selector)
-	return getResourceFieldData(ps.globalConfig, namespace, name, selector, PrunerResourceTypeTaskRun, PrunerFieldTypeSuccessfulHistoryLimit, enforcedConfigLevel)
+	return getResourceFieldData(ps.globalConfig, ps.namespaceConfig, namespace, name, selector, PrunerResourceTypeTaskRun, PrunerFieldTypeSuccessfulHistoryLimit, enforcedConfigLevel)
 }
 
 func (ps *prunerConfigStore) GetTaskFailedHistoryLimitCount(namespace, name string, selector SelectorSpec) (*int32, string) {
 	ps.mutex.Lock()
 	defer ps.mutex.Unlock()
 	enforcedConfigLevel := ps.GetTaskEnforcedConfigLevel(namespace, name, selector)
-	return getResourceFieldData(ps.globalConfig, namespace, name, selector, PrunerResourceTypeTaskRun, PrunerFieldTypeFailedHistoryLimit, enforcedConfigLevel)
+	return getResourceFieldData(ps.globalConfig, ps.namespaceConfig, namespace, name, selector, PrunerResourceTypeTaskRun, PrunerFieldTypeFailedHistoryLimit, enforcedConfigLevel)
+}
+
+func ValidateConfigMap(cm *corev1.ConfigMap) error {
+	return ValidateConfigMapWithGlobal(cm, nil)
+}
+
+// ValidateConfigMapWithGlobal validates a ConfigMap with optional global config for limit enforcement
+// If globalConfigMap is provided and cm is a namespace-level config, it validates that namespace
+// limits do not exceed global limits
+func ValidateConfigMapWithGlobal(cm *corev1.ConfigMap, globalConfigMap *corev1.ConfigMap) error {
+	if cm.Data == nil {
+		return nil
+	}
+
+	// Parse global config if validating a global ConfigMap
+	var globalLimits *PrunerConfig
+	if cm.Data[PrunerGlobalConfigKey] != "" {
+		globalConfig := &GlobalConfig{}
+		if err := yaml.Unmarshal([]byte(cm.Data[PrunerGlobalConfigKey]), globalConfig); err != nil {
+			return fmt.Errorf("failed to parse global-config: %w", err)
+		}
+		if err := validatePrunerConfig(&globalConfig.PrunerConfig, "global-config", nil); err != nil {
+			return err
+		}
+		// Validate nested namespace configs within global config
+		// These are validated against the global limits
+		for ns, nsSpec := range globalConfig.Namespaces {
+			if err := validatePrunerConfig(&nsSpec.PrunerConfig, "global-config.namespaces."+ns, &globalConfig.PrunerConfig); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Parse and validate namespace config against global limits
+	if cm.Data[PrunerNamespaceConfigKey] != "" {
+		namespaceConfig := &NamespaceSpec{}
+		if err := yaml.Unmarshal([]byte(cm.Data[PrunerNamespaceConfigKey]), namespaceConfig); err != nil {
+			return fmt.Errorf("failed to parse namespace-config: %w", err)
+		}
+
+		// Extract global limits if global config is provided
+		if globalConfigMap != nil && globalConfigMap.Data != nil && globalConfigMap.Data[PrunerGlobalConfigKey] != "" {
+			globalConfig := &GlobalConfig{}
+			if err := yaml.Unmarshal([]byte(globalConfigMap.Data[PrunerGlobalConfigKey]), globalConfig); err != nil {
+				// If we can't parse global config, just do basic validation
+				return validatePrunerConfig(&namespaceConfig.PrunerConfig, "namespace-config", nil)
+			}
+			globalLimits = &globalConfig.PrunerConfig
+		}
+
+		// Validate namespace config, enforcing global limits if available
+		if err := validatePrunerConfig(&namespaceConfig.PrunerConfig, "namespace-config", globalLimits); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validatePrunerConfig validates the fields of a PrunerConfig
+// If globalConfig is provided, namespace-level settings are validated to not exceed global limits
+func validatePrunerConfig(config *PrunerConfig, path string, globalConfig *PrunerConfig) error {
+	if config == nil {
+		return nil
+	}
+
+	// Validate EnforcedConfigLevel
+	if config.EnforcedConfigLevel != nil {
+		level := *config.EnforcedConfigLevel
+		if level != EnforcedConfigLevelGlobal &&
+			level != EnforcedConfigLevelNamespace &&
+			level != EnforcedConfigLevelResource {
+			return fmt.Errorf("%s: invalid enforcedConfigLevel '%s', must be one of: global, namespace, resource", path, level)
+		}
+	}
+
+	// Validate TTLSecondsAfterFinished
+	if config.TTLSecondsAfterFinished != nil {
+		if *config.TTLSecondsAfterFinished < 0 {
+			return fmt.Errorf("%s: ttlSecondsAfterFinished cannot be negative, got %d", path, *config.TTLSecondsAfterFinished)
+		}
+		// Namespace config cannot have longer TTL than global config
+		if globalConfig != nil && globalConfig.TTLSecondsAfterFinished != nil {
+			if *config.TTLSecondsAfterFinished > *globalConfig.TTLSecondsAfterFinished {
+				return fmt.Errorf("%s: ttlSecondsAfterFinished (%d) cannot exceed global limit (%d)",
+					path, *config.TTLSecondsAfterFinished, *globalConfig.TTLSecondsAfterFinished)
+			}
+		} else if globalConfig == nil || globalConfig.TTLSecondsAfterFinished == nil {
+			// If no global limit is set, enforce system maximum
+			if *config.TTLSecondsAfterFinished > MaxTTLSecondsAfterFinished {
+				return fmt.Errorf("%s: ttlSecondsAfterFinished (%d) cannot exceed system maximum (%d seconds / 30 days)",
+					path, *config.TTLSecondsAfterFinished, MaxTTLSecondsAfterFinished)
+			}
+		}
+	}
+
+	// Validate SuccessfulHistoryLimit
+	if config.SuccessfulHistoryLimit != nil {
+		if *config.SuccessfulHistoryLimit < 0 {
+			return fmt.Errorf("%s: successfulHistoryLimit cannot be negative, got %d", path, *config.SuccessfulHistoryLimit)
+		}
+		// Namespace config cannot retain more successful runs than global config
+		if globalConfig != nil && globalConfig.SuccessfulHistoryLimit != nil {
+			if *config.SuccessfulHistoryLimit > *globalConfig.SuccessfulHistoryLimit {
+				return fmt.Errorf("%s: successfulHistoryLimit (%d) cannot exceed global limit (%d)",
+					path, *config.SuccessfulHistoryLimit, *globalConfig.SuccessfulHistoryLimit)
+			}
+		} else if globalConfig == nil || globalConfig.SuccessfulHistoryLimit == nil {
+			// If no global limit is set, enforce system maximum
+			if *config.SuccessfulHistoryLimit > MaxHistoryLimit {
+				return fmt.Errorf("%s: successfulHistoryLimit (%d) cannot exceed system maximum (%d)",
+					path, *config.SuccessfulHistoryLimit, MaxHistoryLimit)
+			}
+		}
+	}
+
+	// Validate FailedHistoryLimit
+	if config.FailedHistoryLimit != nil {
+		if *config.FailedHistoryLimit < 0 {
+			return fmt.Errorf("%s: failedHistoryLimit cannot be negative, got %d", path, *config.FailedHistoryLimit)
+		}
+		// Namespace config cannot retain more failed runs than global config
+		if globalConfig != nil && globalConfig.FailedHistoryLimit != nil {
+			if *config.FailedHistoryLimit > *globalConfig.FailedHistoryLimit {
+				return fmt.Errorf("%s: failedHistoryLimit (%d) cannot exceed global limit (%d)",
+					path, *config.FailedHistoryLimit, *globalConfig.FailedHistoryLimit)
+			}
+		} else if globalConfig == nil || globalConfig.FailedHistoryLimit == nil {
+			// If no global limit is set, enforce system maximum
+			if *config.FailedHistoryLimit > MaxHistoryLimit {
+				return fmt.Errorf("%s: failedHistoryLimit (%d) cannot exceed system maximum (%d)",
+					path, *config.FailedHistoryLimit, MaxHistoryLimit)
+			}
+		}
+	}
+
+	// Validate HistoryLimit
+	if config.HistoryLimit != nil {
+		if *config.HistoryLimit < 0 {
+			return fmt.Errorf("%s: historyLimit cannot be negative, got %d", path, *config.HistoryLimit)
+		}
+		// Namespace config cannot retain more runs than global config
+		if globalConfig != nil && globalConfig.HistoryLimit != nil {
+			if *config.HistoryLimit > *globalConfig.HistoryLimit {
+				return fmt.Errorf("%s: historyLimit (%d) cannot exceed global limit (%d)",
+					path, *config.HistoryLimit, *globalConfig.HistoryLimit)
+			}
+		} else if globalConfig == nil || globalConfig.HistoryLimit == nil {
+			// If no global limit is set, enforce system maximum
+			if *config.HistoryLimit > MaxHistoryLimit {
+				return fmt.Errorf("%s: historyLimit (%d) cannot exceed system maximum (%d)",
+					path, *config.HistoryLimit, MaxHistoryLimit)
+			}
+		}
+	}
+
+	return nil
 }
