@@ -1,4 +1,4 @@
-# Generated for Konflux by openshift-pipelines/hack. DO NOT EDIT
+# Generated for Konflux Application openshift-pipelines-core by openshift-pipelines/hack. DO NOT EDIT
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
@@ -15,7 +15,6 @@ metadata:
       ("upstream/***".pathChanged() || ".konflux/patches/***".pathChanged() || ".konflux/rpms/***".pathChanged() ||
       ".konflux/dockerfiles/controller.Dockerfile".pathChanged() ||
       ".tekton/tektoncd-pruner-1-22-controller-pull-request.yaml".pathChanged())
-  creationTimestamp: null
   labels:
     appstudio.openshift.io/application: openshift-pipelines-core-1-22
     appstudio.openshift.io/component: tektoncd-pruner-1-22-controller
@@ -43,7 +42,7 @@ spec:
   pipelineRef:
     name: docker-build-ta
   taskRunTemplate:
-    serviceAccountName: build-pipeline-tektoncd-pruner-1-22-controller
+    serviceAccountName: build-pipeline-tektoncd-pruner-controller-1-22
   workspaces:
   - name: git-auth
     secret:

@@ -1,4 +1,4 @@
-# Generated for Konflux by openshift-pipelines/hack. DO NOT EDIT
+# Generated for Konflux Application openshift-pipelines-core by openshift-pipelines/hack. DO NOT EDIT
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
@@ -37,7 +37,7 @@ spec:
   pipelineRef:
     name: docker-build-ta
   taskRunTemplate:
-    serviceAccountName: build-pipeline-tektoncd-pruner-1-22-controller
+    serviceAccountName: build-pipeline-tektoncd-pruner-controller-1-22
   workspaces:
   - name: git-auth
     secret:
