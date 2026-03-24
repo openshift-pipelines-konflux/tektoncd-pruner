@@ -52,39 +52,53 @@ data:
       staging:
         ttlSecondsAfterFinished: 86400    # 1 day
       prod:
-        ttlSecondsAfterFinished: 2592000  # 30 days
+        ttlSecondsAfterFinished: 2592000
 ```
 
 ## Pipeline-specific TTLs
 
+Use selectors in namespace ConfigMaps for pipeline-specific TTLs:
+
 ```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tekton-pruner-namespace-spec
+  namespace: my-app
+  labels:
+    app.kubernetes.io/part-of: tekton-pruner
+    pruner.tekton.dev/config-type: namespace
 data:
-  global-config: |
-    ttlSecondsAfterFinished: 3600  # Default: 1 hour
+  ns-config: |
+    ttlSecondsAfterFinished: 3600
     pipelineRuns:
       - selector:
-          matchLabels:
+        - matchLabels:
             pipeline-type: release
-        ttlSecondsAfterFinished: 604800  # Releases: 7 days
+        ttlSecondsAfterFinished: 604800
       - selector:
-          matchLabels:
+        - matchLabels:
             pipeline-type: test
-        ttlSecondsAfterFinished: 300     # Tests: 5 min
+        ttlSecondsAfterFinished: 300
 ```
 
 ## Combining TTL with History Limits
 
-History limits **override** TTL to guarantee minimum retention:
+> **Important**: Setting a history limit does NOT prevent TTL from deleting runs.
+
+If you set both TTL and history limit, they run separately. TTL will still delete runs after the time passes, even if you're under the history limit.
 
 ```yaml
 data:
-  global-config: |
-    ttlSecondsAfterFinished: 300      # Delete after 5 min
-    successfulHistoryLimit: 5          # BUT keep last 5 successful
-    failedHistoryLimit: 10             # AND keep last 10 failed
+  ns-config: |
+    ttlSecondsAfterFinished: 300
+    successfulHistoryLimit: 5
+    failedHistoryLimit: 10
 ```
 
-**Result**: Runs are deleted after 5 minutes UNLESS they're in the last 5 successful or last 10 failed.
+**Example**: With the config above, if you only have 3 successful runs and 2 failed runs, and they're all older than 5 minutes, all 5 will be deleted by TTL.
+
+If you want to delete runs purely based on time, **don't set history limits** - just use TTL alone.
 
 ## Verification
 

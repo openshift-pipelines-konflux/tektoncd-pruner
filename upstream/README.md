@@ -14,7 +14,9 @@ cascade:
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/tektoncd/pruner/blob/main/LICENSE)
 
-Tekton Pruner automatically manages the lifecycle of Tekton resources by cleaning up completed PipelineRuns and TaskRuns based on configurable time-based (TTL) and history-based policies.
+Tekton Pruner manages the lifecycle of Tekton resources by automatically cleaning up completed PipelineRuns and TaskRuns based on configurable time-based (TTL) and history-based policies.
+
+> 📖 **For comprehensive architecture details, design decisions, and data flows, see [ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ## Overview
 
@@ -25,15 +27,15 @@ Tekton Pruner provides event-driven and configuration-based cleanup through four
 - **TaskRun Controller**: Handles standalone TaskRun events
 
 <p align="center">
-<img src="docs/images/pruner_functional_abstract.png" alt="Tekton Pruner overview"></img>
+<img src="pruner_functional_abstract.png" alt="Tekton Pruner overview"></img>
 </p>
 
 ## Key Features
 
-- **Time-based Pruning (TTL)**: Delete resources after specified duration using `ttlSecondsAfterFinished`
+- **Time-based Pruning (TTL)**: Delete resources after specified duration (in seconds) using `ttlSecondsAfterFinished`
 - **History-based Pruning**: Retain fixed number of runs using `successfulHistoryLimit`, `failedHistoryLimit`, or `historyLimit`
-- **Hierarchical Configuration**: Global (cluster-wide) → Namespace → Resource Group (Tech Preview)
-- **Flexible Selectors**: Group resources by labels, annotations, or names for fine-grained control
+- **Hierarchical Configuration**: Allows users to specify cluster-wide or per Namespace or per group of resources within a Namespace
+- **Flexible Selectors**: Group resources by labels, annotations, or names (name refers to the pipeline name) for fine-grained control
 
 ## Installation
 
@@ -42,8 +44,8 @@ Tekton Pruner provides event-driven and configuration-based cleanup through four
 
 **Install:**
 ```bash
-export VERSION=0.1.0  # Update as needed
-kubectl apply -f "https://github.com/tektoncd/pruner/releases/download/v$VERSION/release-v$VERSION.yaml"
+export VERSION=0.3.3  # Update as needed
+kubectl apply -f "https://infra.tekton.dev/tekton-releases/pruner/previous/v$VERSION/release.yaml"
 ```
 
 **Verify:**
@@ -51,9 +53,13 @@ kubectl apply -f "https://github.com/tektoncd/pruner/releases/download/v$VERSION
 kubectl get pods -n tekton-pipelines -l app=tekton-pruner-controller
 ```
 
+### Important: v0.3.2 Retraction
+
+**Version v0.3.2 has been retracted** from the Go module registry due to it being an unintended release. Users are recommended not to use v0.3.2.
+
 ## Configuration
 
-> **CRITICAL**: All pruner ConfigMaps **MUST** include these labels for validation and processing:
+> **CRITICAL**: Starting v0.3.0, all pruner ConfigMaps **MUST** include these labels for validation and processing:
 > 
 > ```yaml
 > labels:
@@ -63,7 +69,7 @@ kubectl get pods -n tekton-pipelines -l app=tekton-pruner-controller
 > 
 > **System Boundaries**: Do NOT create namespace-level ConfigMaps in:
 > - System namespaces (`kube-*`, `openshift-*`)
-> - Tekton controller namespaces (`tekton-pipelines`, `tekton-*`)
+> - Tekton controller namespaces (`tekton-pipelines`, `tekton-operator`)
 
 ### Configuration Hierarchy
 
@@ -120,21 +126,31 @@ data:
 
 ### Resource Groups (Fine-grained Control)
 
-Group resources by labels/annotations for different policies:
+Group resources by labels/annotations for different policies within a namespace.
+
+**Note:** Selectors only work in namespace-level ConfigMaps, not global ConfigMaps.
 
 ```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tekton-pruner-namespace-spec
+  namespace: my-app
+  labels:
+    app.kubernetes.io/part-of: tekton-pruner
+    pruner.tekton.dev/config-type: namespace
 data:
-  global-config: |
+  ns-config: |
     pipelineRuns:
       - selector:
-          matchLabels:
+        - matchLabels:
             environment: production
-        ttlSecondsAfterFinished: 604800  # 7 days
+        ttlSecondsAfterFinished: 604800
         successfulHistoryLimit: 10
       - selector:
-          matchLabels:
+        - matchLabels:
             environment: development
-        ttlSecondsAfterFinished: 300     # 5 minutes
+        ttlSecondsAfterFinished: 300
         successfulHistoryLimit: 3
 ```
 

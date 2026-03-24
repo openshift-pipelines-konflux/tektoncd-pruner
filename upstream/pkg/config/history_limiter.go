@@ -50,6 +50,7 @@ type HistoryLimiterResourceFuncs interface {
 	IsCompleted(resource metav1.Object) bool
 	GetDefaultLabelKey() string
 	GetEnforcedConfigLevel(namespace, name string, selectors SelectorSpec) EnforcedConfigLevel
+	GetMatchingSelector(namespace, name string, selectors SelectorSpec) *SelectorSpec
 }
 
 // HistoryLimiter is a struct that encapsulates functionality for managing resources
@@ -269,34 +270,74 @@ func (hl *HistoryLimiter) doResourceCleanup(ctx context.Context, resource metav1
 	var resources []metav1.Object
 	var err error
 
-	if enforcedConfigLevel == EnforcedConfigLevelResource {
-		switch identifiedBy {
-		case "identifiedBy_resource_name":
-			label := fmt.Sprintf("%s=%s", labelKey, resourceName)
-			resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), label)
-		case "identifiedBy_resource_ann":
-			labelSelector := ""
-			for k, v := range resourceAnnotations {
+	// Handle selector-based identification for both resource and namespace enforcement levels
+	switch identifiedBy {
+	case "identifiedBy_resource_name":
+		// Filter by name label (resource-level enforcement)
+		label := fmt.Sprintf("%s=%s", labelKey, resourceName)
+		resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), label)
+	case "identifiedBy_resource_selector":
+		// Filter by the ConfigMap's selector labels only
+		matchingSelector := hl.resourceFn.GetMatchingSelector(resource.GetNamespace(), resourceName, resourceSelectors)
+		labelSelector := ""
+		if matchingSelector != nil && len(matchingSelector.MatchLabels) > 0 {
+			for k, v := range matchingSelector.MatchLabels {
 				if labelSelector != "" {
 					labelSelector += ","
 				}
 				labelSelector += fmt.Sprintf("%s=%s", k, v)
 			}
-			resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), labelSelector)
-		case "identifiedBy_resource_label":
-			labelSelector := ""
-			for k, v := range resourceLabels {
-				if labelSelector != "" {
-					labelSelector += ","
-				}
-				labelSelector += fmt.Sprintf("%s=%s", k, v)
-			}
-			resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), labelSelector)
-		default:
-			resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), "")
 		}
-	} else {
-		// For namespace or global level, list all resources in namespace
+		logger.Debugw("listing resources with selector from ConfigMap",
+			"resource", hl.resourceFn.Type(),
+			"namespace", resource.GetNamespace(),
+			"labelSelector", labelSelector)
+		resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), labelSelector)
+		if err != nil {
+			return err
+		}
+		if matchingSelector != nil && len(matchingSelector.MatchAnnotations) > 0 {
+			filteredResources := []metav1.Object{}
+			for _, res := range resources {
+				resAnnotations := res.GetAnnotations()
+				if resAnnotations == nil {
+					continue
+				}
+				matches := true
+				for k, v := range matchingSelector.MatchAnnotations {
+					if resAnnotations[k] != v {
+						matches = false
+						break
+					}
+				}
+				if matches {
+					filteredResources = append(filteredResources, res)
+				}
+			}
+			resources = filteredResources
+		}
+	case "identifiedBy_resource_ann":
+		// Filter by annotations (converted to labels for listing)
+		labelSelector := ""
+		for k, v := range resourceAnnotations {
+			if labelSelector != "" {
+				labelSelector += ","
+			}
+			labelSelector += fmt.Sprintf("%s=%s", k, v)
+		}
+		resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), labelSelector)
+	case "identifiedBy_resource_label":
+		// Filter by all resource labels
+		labelSelector := ""
+		for k, v := range resourceLabels {
+			if labelSelector != "" {
+				labelSelector += ","
+			}
+			labelSelector += fmt.Sprintf("%s=%s", k, v)
+		}
+		resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), labelSelector)
+	default:
+		// For namespace/global level without selectors, list all resources in namespace
 		resources, err = hl.resourceFn.List(ctx, resource.GetNamespace(), "")
 	}
 

@@ -37,7 +37,67 @@ metadata:
 Invalid pruner ConfigMap labels: ConfigMap must have label app.kubernetes.io/part-of=tekton-pruner
 ```
 
-### 2. Naming Requirements
+### 2. Selector Restrictions
+
+**CRITICAL:** Selectors (matchLabels/matchAnnotations) are ONLY supported in namespace-level ConfigMaps (`tekton-pruner-namespace-spec`), NOT in global ConfigMaps.
+
+**Valid - Selectors in Namespace ConfigMap:**
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tekton-pruner-namespace-spec
+  namespace: dev
+  labels:
+    app.kubernetes.io/part-of: tekton-pruner
+    pruner.tekton.dev/config-type: namespace
+data:
+  ns-config: |
+    pipelineRuns:
+      - selector:                  # OK - This is a namespace ConfigMap
+          - matchLabels:
+              app: myapp
+        ttlSecondsAfterFinished: 1800
+```
+
+**Invalid - Selectors in Global ConfigMap:**
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tekton-pruner-default-spec
+  namespace: tekton-pipelines
+  labels:
+    app.kubernetes.io/part-of: tekton-pruner
+    pruner.tekton.dev/config-type: global
+data:
+  global-config: |
+    namespaces:
+      dev:
+        pipelineRuns:
+          - selector:              # WILL FAIL VALIDATION
+              - matchLabels:
+                  app: myapp
+        ttlSecondsAfterFinished: 1800
+```
+
+**Error example:**
+```
+Invalid pruner configuration: global-config.namespaces.dev.pipelineRuns[0]: 
+selectors are NOT supported in global ConfigMap. 
+Use namespace-level ConfigMap (tekton-pruner-namespace-spec) instead
+```
+
+**Why this restriction?**
+- Selector-based resource matching requires access to the resource's labels/annotations at runtime
+- Global ConfigMaps are designed for cluster-wide defaults, not resource-specific matching
+- Namespace ConfigMaps provide the correct scope for dynamic resource selection
+
+**See also:** [Resource Groups Tutorial](tutorials/resource-groups.md) for selector usage examples
+
+### 3. Naming Requirements
 
 **Global Config:**
 - **Name:** Must be `tekton-pruner-default-spec` (fixed)
@@ -57,7 +117,7 @@ Global config must be named 'tekton-pruner-default-spec', got: my-custom-name
 Namespace config must be named 'tekton-pruner-namespace-spec', got: pruner-config
 ```
 
-### 3. Namespace Restrictions
+### 4. Namespace Restrictions
 
 **Forbidden namespaces for namespace-level configs:**
 - System namespaces: `kube-*`, `openshift-*`
@@ -70,19 +130,21 @@ Attempting to create a namespace-level config in these locations will be rejecte
 Invalid pruner ConfigMap configuration: wrong config-type label or namespace combination
 ```
 
-### 4. Configuration Content Validation
+### 5. Configuration Content Validation
 
 The webhook validates configuration data including:
 
 - **Time values**: ttlSecondsAfterFinished must be non-negative
 - **History limits**: historyLimit, successfulHistoryLimit, and failedHistoryLimit must be non-negative and cannot exceed global maximums if enforced
-- **Selectors**: Label and annotation selectors must have valid key-value pairs; name selectors must be valid resource names
+- **Selectors** (namespace ConfigMaps only): Label and annotation selectors must have valid key-value pairs; name selectors must be valid resource names
 
-### 5. Deletion Protection
+**Note:** Selectors (pipelineRuns, taskRuns arrays with matchLabels/matchAnnotations) are only processed in namespace-level ConfigMaps. They are ignored in global ConfigMaps.
+
+### 6. Deletion Protection
 
 The webhook prevents deletion of the global config if namespace-level configs still exist. You must delete all namespace configs before deleting the global config. Namespace configs can be deleted without restrictions.
 
-### 6. Global Config Enforcement
+### 7. Global Config Enforcement
 
 When creating or updating namespace-level configs, the webhook fetches the global config and validates that namespace values do not exceed global maximums if defined (e.g., maxTTLSecondsAfterFinished, maxHistoryLimit).
 
