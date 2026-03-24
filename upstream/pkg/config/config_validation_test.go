@@ -203,7 +203,7 @@ func TestValidateConfigMap_InvalidNamespaceConfig(t *testing.T) {
 		{
 			name:       "invalid YAML",
 			config:     `bad yaml: [[[`,
-			wantErrMsg: "failed to parse namespace-config",
+			wantErrMsg: "failed to parse ns-config",
 		},
 	}
 
@@ -534,11 +534,10 @@ func TestValidateConfigMap_SystemMaximumEnforcement(t *testing.T) {
 		wantErrMsg string
 	}{
 		{
-			name:       "global config exceeds system maximum TTL",
+			name:       "global config can exceed system maximum TTL",
 			configType: "global",
 			config:     `ttlSecondsAfterFinished: 2592001`,
-			wantErr:    true,
-			wantErrMsg: "cannot exceed system maximum (2592000 seconds / 30 days)",
+			wantErr:    false,
 		},
 		{
 			name:       "global config at system maximum TTL",
@@ -547,11 +546,10 @@ func TestValidateConfigMap_SystemMaximumEnforcement(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "global config exceeds system maximum successfulHistoryLimit",
+			name:       "global config can exceed system maximum successfulHistoryLimit",
 			configType: "global",
 			config:     `successfulHistoryLimit: 101`,
-			wantErr:    true,
-			wantErrMsg: "cannot exceed system maximum (100)",
+			wantErr:    false,
 		},
 		{
 			name:       "global config at system maximum successfulHistoryLimit",
@@ -560,11 +558,10 @@ func TestValidateConfigMap_SystemMaximumEnforcement(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "global config exceeds system maximum failedHistoryLimit",
+			name:       "global config can exceed system maximum failedHistoryLimit",
 			configType: "global",
 			config:     `failedHistoryLimit: 150`,
-			wantErr:    true,
-			wantErrMsg: "cannot exceed system maximum (100)",
+			wantErr:    false,
 		},
 		{
 			name:       "global config at system maximum failedHistoryLimit",
@@ -573,11 +570,10 @@ func TestValidateConfigMap_SystemMaximumEnforcement(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "global config exceeds system maximum historyLimit",
+			name:       "global config can exceed system maximum historyLimit",
 			configType: "global",
 			config:     `historyLimit: 200`,
-			wantErr:    true,
-			wantErrMsg: "cannot exceed system maximum (100)",
+			wantErr:    false,
 		},
 		{
 			name:       "global config at system maximum historyLimit",
@@ -612,13 +608,12 @@ func TestValidateConfigMap_SystemMaximumEnforcement(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "global config with multiple fields exceeding system maximum",
+			name:       "global config can have multiple fields exceeding system maximum",
 			configType: "global",
 			config: `ttlSecondsAfterFinished: 3000000
 successfulHistoryLimit: 150
 failedHistoryLimit: 200`,
-			wantErr:    true,
-			wantErrMsg: "cannot exceed system maximum",
+			wantErr: false,
 		},
 	}
 
@@ -743,6 +738,280 @@ func TestValidateConfigMapWithGlobal_GlobalOverridesSystemMaximum(t *testing.T) 
 			} else {
 				if err != nil {
 					t.Errorf("ValidateConfigMapWithGlobal() unexpected error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateGlobalConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     *GlobalConfig
+		wantErr    bool
+		wantErrMsg string
+	}{
+		{
+			name: "valid global config with all fields",
+			config: &GlobalConfig{
+				PrunerConfig: PrunerConfig{
+					TTLSecondsAfterFinished: int32Ptr(int32(3600)),
+					SuccessfulHistoryLimit:  int32Ptr(int32(10)),
+					FailedHistoryLimit:      int32Ptr(int32(10)),
+					HistoryLimit:            int32Ptr(int32(100)),
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid global config with namespace overrides",
+			config: &GlobalConfig{
+				PrunerConfig: PrunerConfig{
+					TTLSecondsAfterFinished: int32Ptr(int32(7200)),
+					SuccessfulHistoryLimit:  int32Ptr(int32(20)),
+				},
+				Namespaces: map[string]NamespaceSpec{
+					"dev": {
+						PrunerConfig: PrunerConfig{
+							TTLSecondsAfterFinished: int32Ptr(int32(3600)),
+							SuccessfulHistoryLimit:  int32Ptr(int32(10)),
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid - negative TTL",
+			config: &GlobalConfig{
+				PrunerConfig: PrunerConfig{
+					TTLSecondsAfterFinished: int32Ptr(int32(-1)),
+				},
+			},
+			wantErr:    true,
+			wantErrMsg: "ttlSecondsAfterFinished cannot be negative",
+		},
+		{
+			name: "invalid - namespace config exceeds global limit",
+			config: &GlobalConfig{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(10)),
+				},
+				Namespaces: map[string]NamespaceSpec{
+					"dev": {
+						PrunerConfig: PrunerConfig{
+							SuccessfulHistoryLimit: int32Ptr(int32(20)), // Exceeds global
+						},
+					},
+				},
+			},
+			wantErr:    true,
+			wantErrMsg: "cannot exceed global limit",
+		},
+		{
+			name: "invalid - selectors in global config namespace section",
+			config: &GlobalConfig{
+				PrunerConfig: PrunerConfig{
+					TTLSecondsAfterFinished: int32Ptr(int32(3600)),
+				},
+				Namespaces: map[string]NamespaceSpec{
+					"dev": {
+						PipelineRuns: []ResourceSpec{
+							{
+								Name: "my-pipeline",
+								Selector: []SelectorSpec{
+									{
+										MatchLabels: map[string]string{"app": "test"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr:    true,
+			wantErrMsg: "selectors are NOT supported in global ConfigMap",
+		},
+		{
+			name:    "nil config should not error",
+			config:  nil,
+			wantErr: false,
+		},
+		{
+			name: "empty config should not error",
+			config: &GlobalConfig{
+				PrunerConfig: PrunerConfig{},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateGlobalConfig(tt.config)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ValidateGlobalConfig() expected error containing '%s', got nil", tt.wantErrMsg)
+					return
+				}
+				if !strings.Contains(err.Error(), tt.wantErrMsg) {
+					t.Errorf("ValidateGlobalConfig() error = %v, want error containing %v", err, tt.wantErrMsg)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("ValidateGlobalConfig() unexpected error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateNamespaceSpec(t *testing.T) {
+	tests := []struct {
+		name          string
+		namespaceSpec *NamespaceSpec
+		namespace     string
+		globalConfig  *GlobalConfig
+		wantErr       bool
+		wantErrMsg    string
+	}{
+		{
+			name: "valid namespace spec without global config",
+			namespaceSpec: &NamespaceSpec{
+				PrunerConfig: PrunerConfig{
+					TTLSecondsAfterFinished: int32Ptr(int32(3600)),
+					SuccessfulHistoryLimit:  int32Ptr(int32(10)),
+				},
+			},
+			namespace:    "dev",
+			globalConfig: nil,
+			wantErr:      false,
+		},
+		{
+			name: "valid namespace spec with selectors",
+			namespaceSpec: &NamespaceSpec{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(10)),
+				},
+				PipelineRuns: []ResourceSpec{
+					{
+						Selector: []SelectorSpec{
+							{
+								MatchLabels: map[string]string{"app": "test"},
+							},
+						},
+						PrunerConfig: PrunerConfig{
+							SuccessfulHistoryLimit: int32Ptr(int32(5)),
+						},
+					},
+				},
+			},
+			namespace:    "dev",
+			globalConfig: nil,
+			wantErr:      false,
+		},
+		{
+			name: "valid namespace spec within global limits",
+			namespaceSpec: &NamespaceSpec{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(10)),
+				},
+			},
+			namespace: "dev",
+			globalConfig: &GlobalConfig{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(20)),
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid - exceeds global limit",
+			namespaceSpec: &NamespaceSpec{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(30)),
+				},
+			},
+			namespace: "dev",
+			globalConfig: &GlobalConfig{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(20)),
+				},
+			},
+			wantErr:    true,
+			wantErrMsg: "cannot exceed global limit",
+		},
+		{
+			name: "invalid - selector sum exceeds limit",
+			namespaceSpec: &NamespaceSpec{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(10)),
+				},
+				PipelineRuns: []ResourceSpec{
+					{
+						Selector: []SelectorSpec{
+							{
+								MatchLabels: map[string]string{"app": "test1"},
+							},
+						},
+						PrunerConfig: PrunerConfig{
+							SuccessfulHistoryLimit: int32Ptr(int32(7)),
+						},
+					},
+					{
+						Selector: []SelectorSpec{
+							{
+								MatchLabels: map[string]string{"app": "test2"},
+							},
+						},
+						PrunerConfig: PrunerConfig{
+							SuccessfulHistoryLimit: int32Ptr(int32(7)),
+						},
+					},
+				},
+			},
+			namespace:    "dev",
+			globalConfig: nil,
+			wantErr:      true,
+			wantErrMsg:   "sum of selector successfulHistoryLimit",
+		},
+		{
+			name:          "nil namespace spec should not error",
+			namespaceSpec: nil,
+			namespace:     "dev",
+			globalConfig:  nil,
+			wantErr:       false,
+		},
+		{
+			name: "negative values should error",
+			namespaceSpec: &NamespaceSpec{
+				PrunerConfig: PrunerConfig{
+					SuccessfulHistoryLimit: int32Ptr(int32(-5)),
+				},
+			},
+			namespace:    "dev",
+			globalConfig: nil,
+			wantErr:      true,
+			wantErrMsg:   "cannot be negative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateNamespaceSpec(tt.namespaceSpec, tt.namespace, tt.globalConfig)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ValidateNamespaceSpec() expected error containing '%s', got nil", tt.wantErrMsg)
+					return
+				}
+				if !strings.Contains(err.Error(), tt.wantErrMsg) {
+					t.Errorf("ValidateNamespaceSpec() error = %v, want error containing %v", err, tt.wantErrMsg)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("ValidateNamespaceSpec() unexpected error = %v", err)
 				}
 			}
 		})
